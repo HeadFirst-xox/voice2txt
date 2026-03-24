@@ -231,7 +231,10 @@ class RealtimeSession:
                     out.append(samples[int(pos)])
                     pos += ratio
                 downsampled = struct.pack(f"<{len(out)}h", *out)
-                session.recognition.send_audio_frame(downsampled)
+                try:
+                    session.recognition.send_audio_frame(downsampled)
+                except Exception:
+                    break
 
         self.feed_thread = threading.Thread(target=feed_audio, daemon=True)
         self.feed_thread.start()

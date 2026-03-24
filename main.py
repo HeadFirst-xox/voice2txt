@@ -212,7 +212,10 @@ def main():
             if not data:
                 break
             data = downsample_pcm16(data, MIC_RATE, TARGET_RATE)
-            recognition.send_audio_frame(data)
+            try:
+                recognition.send_audio_frame(data)
+            except Exception:
+                break
         else:
             break
 
