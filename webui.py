@@ -3,12 +3,22 @@
 语音转文字 WebUI
 基于阿里云百炼 Fun-ASR API，使用 Gradio 构建界面
 支持：上传音频文件 / 浏览器麦克风录音 / 实时流式识别
+
+运行方式:
+  python webui.py              # 前台运行
+  python webui.py -d           # 后台运行，自动打开浏览器
+  python webui.py --stop       # 停止后台进程
+  python webui.py --status     # 查看运行状态
 """
 
 import os
+import sys
 import io
 import time
+import signal
 import struct
+import atexit
+import argparse
 import tempfile
 import threading
 import subprocess
@@ -22,6 +32,119 @@ from polish import polish_text
 
 TARGET_RATE = 16000
 API_MODEL = "fun-asr-realtime"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PID_FILE = os.path.join(BASE_DIR, ".webui.pid")
+LOG_FILE = os.path.join(BASE_DIR, "webui.log")
+DEFAULT_PORT = 7860
+DEFAULT_IDLE_TIMEOUT = 300
+
+
+# ─── 空闲自动关闭 ───
+
+class IdleWatchdog:
+    """跟踪用户活动，空闲超时后自动关闭服务"""
+
+    def __init__(self, timeout: int):
+        self.timeout = timeout
+        self.last_activity = time.time()
+        self._stop = threading.Event()
+
+    def touch(self):
+        self.last_activity = time.time()
+
+    def start(self):
+        if self.timeout <= 0:
+            return
+
+        def _watch():
+            while not self._stop.wait(15):
+                idle = time.time() - self.last_activity
+                if idle >= self.timeout:
+                    print(f"\n⏹ 空闲 {int(idle)}s，自动关闭服务")
+                    _cleanup_pid()
+                    os._exit(0)
+
+        t = threading.Thread(target=_watch, daemon=True)
+        t.start()
+
+    def stop(self):
+        self._stop.set()
+
+
+idle_watchdog = IdleWatchdog(0)
+
+
+def with_activity(fn):
+    """装饰器：调用时刷新空闲计时"""
+    def wrapper(*args, **kwargs):
+        idle_watchdog.touch()
+        return fn(*args, **kwargs)
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+
+# ─── 进程管理 ───
+
+def _write_pid():
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    atexit.register(_cleanup_pid)
+
+
+def _cleanup_pid():
+    try:
+        os.unlink(PID_FILE)
+    except OSError:
+        pass
+
+
+def _read_pid() -> int | None:
+    try:
+        with open(PID_FILE) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 0)
+        return pid
+    except (FileNotFoundError, ValueError, ProcessLookupError):
+        _cleanup_pid()
+        return None
+
+
+def _cmd_stop():
+    pid = _read_pid()
+    if pid is None:
+        print("没有找到运行中的 WebUI 进程")
+        sys.exit(1)
+    os.kill(pid, signal.SIGTERM)
+    print(f"已停止 WebUI (PID: {pid})")
+    _cleanup_pid()
+    sys.exit(0)
+
+
+def _cmd_status():
+    pid = _read_pid()
+    if pid:
+        print(f"WebUI 正在运行 (PID: {pid})")
+        print(f"访问: http://localhost:{DEFAULT_PORT}")
+    else:
+        print("WebUI 未运行")
+    sys.exit(0)
+
+
+def _daemonize():
+    pid = os.fork()
+    if pid > 0:
+        print(f"WebUI 已在后台启动 (PID: {pid})")
+        print(f"访问: http://localhost:{DEFAULT_PORT}")
+        print(f"停止: python webui.py --stop")
+
+        import webbrowser
+        time.sleep(1)
+        webbrowser.open(f"http://localhost:{DEFAULT_PORT}")
+        sys.exit(0)
+    os.setsid()
+    with open(LOG_FILE, "a") as log:
+        os.dup2(log.fileno(), sys.stdout.fileno())
+        os.dup2(log.fileno(), sys.stderr.fileno())
 
 
 def get_api_key():
@@ -53,6 +176,7 @@ def audio_to_pcm16(audio_path: str) -> bytes:
 
 # ─── 功能1：上传音频文件识别 ───
 
+@with_activity
 def transcribe_file(audio_path, api_key, model, language, enable_polish=False):
     """返回 (原始识别文本, 润色文本)，润色未启用时第二项为空"""
     if not api_key:
@@ -124,6 +248,7 @@ def transcribe_file(audio_path, api_key, model, language, enable_polish=False):
 
 # ─── 功能2：浏览器麦克风录音识别 ───
 
+@with_activity
 def transcribe_mic(audio_data, api_key, model, language, enable_polish=False):
     """返回 (原始识别文本, 润色文本)"""
     if not api_key:
@@ -259,6 +384,7 @@ class RealtimeSession:
 realtime_session = RealtimeSession()
 
 
+@with_activity
 def start_realtime(api_key, model):
     if not api_key:
         return "❌ 请先填写 API Key", "", gr.update(interactive=False), gr.update(interactive=True)
@@ -266,6 +392,7 @@ def start_realtime(api_key, model):
     return "🎤 正在录音...", "", gr.update(interactive=True), gr.update(interactive=False)
 
 
+@with_activity
 def stop_realtime(api_key="", enable_polish=False):
     realtime_session.stop()
     raw = realtime_session.get_text()
@@ -275,6 +402,7 @@ def stop_realtime(api_key="", enable_polish=False):
     return raw, polished, gr.update(interactive=False), gr.update(interactive=True)
 
 
+@with_activity
 def poll_realtime():
     return realtime_session.get_text()
 
@@ -395,6 +523,63 @@ def build_ui():
     return demo
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="语音转文字 WebUI")
+    parser.add_argument(
+        "-d", "--daemon", action="store_true",
+        help="后台运行，自动打开浏览器",
+    )
+    parser.add_argument(
+        "--stop", action="store_true",
+        help="停止后台运行的 WebUI 进程",
+    )
+    parser.add_argument(
+        "--status", action="store_true",
+        help="查看 WebUI 运行状态",
+    )
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_PORT,
+        help=f"监听端口 (默认: {DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--idle-timeout", type=int, default=None,
+        help=f"空闲自动关闭秒数，0 为禁用 (后台模式默认: {DEFAULT_IDLE_TIMEOUT}s)",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_args()
+
+    if args.stop:
+        _cmd_stop()
+    if args.status:
+        _cmd_status()
+
+    existing = _read_pid()
+    if existing:
+        print(f"WebUI 已在运行 (PID: {existing})，先执行 python webui.py --stop")
+        sys.exit(1)
+
+    timeout = args.idle_timeout
+    if timeout is None:
+        timeout = DEFAULT_IDLE_TIMEOUT if args.daemon else 0
+
+    if args.daemon:
+        _daemonize()
+
+    _write_pid()
+    idle_watchdog.timeout = timeout
+    idle_watchdog.start()
+
+    if timeout > 0:
+        print(f"🔧 空闲自动关闭: {timeout}s")
+
     demo = build_ui()
-    demo.launch(server_name="0.0.0.0", server_port=7860, theme=gr.themes.Soft(), css=CSS)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=args.port,
+        theme=gr.themes.Soft(),
+        css=CSS,
+        quiet=args.daemon,
+    )

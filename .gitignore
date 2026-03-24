@@ -5,3 +5,5 @@ __pycache__/
 *.env
 .env.*
 temp_dir/
+.webui.pid
+webui.log
