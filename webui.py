@@ -18,6 +18,8 @@ import gradio as gr
 from http import HTTPStatus
 from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
 
+from polish import polish_text
+
 TARGET_RATE = 16000
 API_MODEL = "fun-asr-realtime"
 
@@ -51,7 +53,7 @@ def audio_to_pcm16(audio_path: str) -> bytes:
 
 # ─── 功能1：上传音频文件识别 ───
 
-def transcribe_file(audio_path, api_key, model, language):
+def transcribe_file(audio_path, api_key, model, language, enable_polish=False):
     if not api_key:
         return "❌ 请先填写 API Key"
     if not audio_path:
@@ -109,13 +111,20 @@ def transcribe_file(audio_path, api_key, model, language):
 
     audio_duration = len(pcm_data) / (TARGET_RATE * 2)
     full_text = "".join(sentences)
-    stats = f"\n\n---\n⏱️ 音频时长: {audio_duration:.1f}s | 处理耗时: {elapsed:.1f}s | RTF: {elapsed/max(audio_duration, 0.1):.2f}x"
-    return full_text + stats
+
+    if enable_polish and full_text.strip():
+        polished = polish_text(full_text, api_key)
+        stats = f"\n\n---\n✨ 已润色 | ⏱️ 音频时长: {audio_duration:.1f}s | 处理耗时: {elapsed:.1f}s | RTF: {elapsed/max(audio_duration, 0.1):.2f}x"
+        stats += f"\n\n📝 原始文本:\n{full_text}"
+        return polished + stats
+    else:
+        stats = f"\n\n---\n⏱️ 音频时长: {audio_duration:.1f}s | 处理耗时: {elapsed:.1f}s | RTF: {elapsed/max(audio_duration, 0.1):.2f}x"
+        return full_text + stats
 
 
 # ─── 功能2：浏览器麦克风录音识别 ───
 
-def transcribe_mic(audio_data, api_key, model, language):
+def transcribe_mic(audio_data, api_key, model, language, enable_polish=False):
     if not api_key:
         return "❌ 请先填写 API Key"
     if audio_data is None:
@@ -140,7 +149,7 @@ def transcribe_mic(audio_data, api_key, model, language):
         tmp_path = f.name
 
     try:
-        result = transcribe_file(tmp_path, api_key, model, language)
+        result = transcribe_file(tmp_path, api_key, model, language, enable_polish)
     finally:
         os.unlink(tmp_path)
 
@@ -253,9 +262,13 @@ def start_realtime(api_key, model):
     return "🎤 正在录音...", gr.update(interactive=True), gr.update(interactive=False)
 
 
-def stop_realtime():
+def stop_realtime(api_key="", enable_polish=False):
     realtime_session.stop()
     text = realtime_session.get_text()
+    if enable_polish and text.strip() and not text.startswith("（"):
+        raw = text
+        polished = polish_text(raw, api_key)
+        text = f"{polished}\n\n---\n✨ 已润色\n\n📝 原始文本:\n{raw}"
     return text, gr.update(interactive=False), gr.update(interactive=True)
 
 
@@ -300,6 +313,11 @@ def build_ui():
             lang_input = gr.Dropdown(
                 label="语言", choices=LANGUAGES, value="auto", scale=1,
             )
+            polish_toggle = gr.Checkbox(
+                label="✨ 润色", value=False,
+                info="使用 LLM 去除口头禅、润色语序",
+                scale=1,
+            )
 
         with gr.Tabs():
             # Tab 1: 上传文件
@@ -314,7 +332,7 @@ def build_ui():
                 )
                 file_btn.click(
                     transcribe_file,
-                    inputs=[file_input, api_key_input, model_input, lang_input],
+                    inputs=[file_input, api_key_input, model_input, lang_input, polish_toggle],
                     outputs=file_output,
                 )
 
@@ -331,7 +349,7 @@ def build_ui():
                 )
                 mic_btn.click(
                     transcribe_mic,
-                    inputs=[mic_input, api_key_input, model_input, lang_input],
+                    inputs=[mic_input, api_key_input, model_input, lang_input, polish_toggle],
                     outputs=mic_output,
                 )
 
@@ -353,6 +371,7 @@ def build_ui():
                 )
                 stop_btn.click(
                     stop_realtime,
+                    inputs=[api_key_input, polish_toggle],
                     outputs=[realtime_output, stop_btn, start_btn],
                 )
                 refresh_btn.click(

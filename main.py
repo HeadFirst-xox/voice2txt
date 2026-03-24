@@ -21,6 +21,8 @@ import argparse
 import dashscope
 from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
 
+from polish import polish_text
+
 MIC_RATE = 48000
 TARGET_RATE = 16000
 CHANNELS = 1
@@ -30,6 +32,7 @@ recognition: Recognition | None = None
 recorder: subprocess.Popen | None = None
 output_file = None
 final_texts: list[str] = []
+enable_polish = False
 
 
 def downsample_pcm16(data: bytes, from_rate: int, to_rate: int) -> bytes:
@@ -123,12 +126,21 @@ def signal_handler(sig, frame):
         for i, t in enumerate(final_texts, 1):
             print(f"   {i}. {t}")
 
+        if enable_polish:
+            raw = "".join(final_texts)
+            print("\n✨ 正在润色...")
+            polished = polish_text(raw, dashscope.api_key)
+            print(f"\n📝 润色结果:\n   {polished}")
+            if output_file:
+                output_file.write(f"\n--- 润色结果 ---\n{polished}\n")
+                output_file.flush()
+
     cleanup()
     sys.exit(0)
 
 
 def main():
-    global recognition, output_file
+    global recognition, output_file, enable_polish
 
     parser = argparse.ArgumentParser(description="麦克风实时语音转文字工具")
     parser.add_argument(
@@ -151,6 +163,11 @@ def main():
         action="store_true",
         help="启用语义断句 (默认使用 VAD 断句)",
     )
+    parser.add_argument(
+        "--polish",
+        action="store_true",
+        help="停止录音后使用 LLM 润色识别文本（去口头禅、去重复、通顺语序）",
+    )
     args = parser.parse_args()
 
     api_key = args.api_key or os.environ.get("DASHSCOPE_API_KEY")
@@ -165,11 +182,15 @@ def main():
         "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
     )
 
+    enable_polish = args.polish
+
     if args.output:
         output_file = open(args.output, "a", encoding="utf-8")
         print(f"📄 识别结果将保存到: {args.output}")
 
     print(f"🔧 模型: {args.model}")
+    if enable_polish:
+        print(f"🔧 润色: 已启用 (qwen-turbo-latest)")
     print(f"🔧 采样率: {MIC_RATE}Hz -> {TARGET_RATE}Hz, 格式: PCM, 单声道")
     print("─" * 50)
 
