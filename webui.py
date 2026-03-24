@@ -54,17 +54,18 @@ def audio_to_pcm16(audio_path: str) -> bytes:
 # ─── 功能1：上传音频文件识别 ───
 
 def transcribe_file(audio_path, api_key, model, language, enable_polish=False):
+    """返回 (原始识别文本, 润色文本)，润色未启用时第二项为空"""
     if not api_key:
-        return "❌ 请先填写 API Key"
+        return "❌ 请先填写 API Key", ""
     if not audio_path:
-        return "❌ 请先上传音频文件"
+        return "❌ 请先上传音频文件", ""
 
     init_dashscope(api_key)
 
     try:
         pcm_data = audio_to_pcm16(audio_path)
     except Exception as e:
-        return f"❌ 音频转码失败: {e}"
+        return f"❌ 音频转码失败: {e}", ""
 
     sentences = []
     done_event = threading.Event()
@@ -107,28 +108,28 @@ def transcribe_file(audio_path, api_key, model, language, enable_polish=False):
     elapsed = time.time() - start_time
 
     if error_msg:
-        return error_msg[0]
+        return error_msg[0], ""
 
     audio_duration = len(pcm_data) / (TARGET_RATE * 2)
     full_text = "".join(sentences)
+    stats = f"\n\n---\n⏱️ 音频时长: {audio_duration:.1f}s | 处理耗时: {elapsed:.1f}s | RTF: {elapsed/max(audio_duration, 0.1):.2f}x"
+    raw_result = full_text + stats
 
     if enable_polish and full_text.strip():
         polished = polish_text(full_text, api_key)
-        stats = f"\n\n---\n✨ 已润色 | ⏱️ 音频时长: {audio_duration:.1f}s | 处理耗时: {elapsed:.1f}s | RTF: {elapsed/max(audio_duration, 0.1):.2f}x"
-        stats += f"\n\n📝 原始文本:\n{full_text}"
-        return polished + stats
-    else:
-        stats = f"\n\n---\n⏱️ 音频时长: {audio_duration:.1f}s | 处理耗时: {elapsed:.1f}s | RTF: {elapsed/max(audio_duration, 0.1):.2f}x"
-        return full_text + stats
+        return raw_result, polished
+
+    return raw_result, ""
 
 
 # ─── 功能2：浏览器麦克风录音识别 ───
 
 def transcribe_mic(audio_data, api_key, model, language, enable_polish=False):
+    """返回 (原始识别文本, 润色文本)"""
     if not api_key:
-        return "❌ 请先填写 API Key"
+        return "❌ 请先填写 API Key", ""
     if audio_data is None:
-        return "❌ 请先录音"
+        return "❌ 请先录音", ""
 
     sample_rate, samples = audio_data
 
@@ -257,24 +258,21 @@ realtime_session = RealtimeSession()
 
 def start_realtime(api_key, model):
     if not api_key:
-        return "❌ 请先填写 API Key", gr.update(interactive=False), gr.update(interactive=True)
+        return "❌ 请先填写 API Key", "", gr.update(interactive=False), gr.update(interactive=True)
     realtime_session.start(api_key, model)
-    return "🎤 正在录音...", gr.update(interactive=True), gr.update(interactive=False)
+    return "🎤 正在录音...", "", gr.update(interactive=True), gr.update(interactive=False)
 
 
 def stop_realtime(api_key="", enable_polish=False):
     realtime_session.stop()
-    text = realtime_session.get_text()
-    if enable_polish and text.strip() and not text.startswith("（"):
-        raw = text
+    raw = realtime_session.get_text()
+    polished = ""
+    if enable_polish and raw.strip() and not raw.startswith("（"):
         polished = polish_text(raw, api_key)
-        text = f"{polished}\n\n---\n✨ 已润色\n\n📝 原始文本:\n{raw}"
-    return text, gr.update(interactive=False), gr.update(interactive=True)
+    return raw, polished, gr.update(interactive=False), gr.update(interactive=True)
 
 
 def poll_realtime():
-    if realtime_session.running:
-        return realtime_session.get_text()
     return realtime_session.get_text()
 
 
@@ -327,13 +325,17 @@ def build_ui():
                     type="filepath",
                 )
                 file_btn = gr.Button("开始识别", variant="primary")
-                file_output = gr.Textbox(
-                    label="识别结果", lines=10, elem_classes="result-box",
-                )
+                with gr.Row():
+                    file_raw_output = gr.Textbox(
+                        label="原始识别", lines=10, elem_classes="result-box",
+                    )
+                    file_polished_output = gr.Textbox(
+                        label="✨ 润色结果", lines=10, elem_classes="result-box",
+                    )
                 file_btn.click(
                     transcribe_file,
                     inputs=[file_input, api_key_input, model_input, lang_input, polish_toggle],
-                    outputs=file_output,
+                    outputs=[file_raw_output, file_polished_output],
                 )
 
             # Tab 2: 浏览器麦克风
@@ -344,13 +346,17 @@ def build_ui():
                     type="numpy",
                 )
                 mic_btn = gr.Button("识别录音", variant="primary")
-                mic_output = gr.Textbox(
-                    label="识别结果", lines=10, elem_classes="result-box",
-                )
+                with gr.Row():
+                    mic_raw_output = gr.Textbox(
+                        label="原始识别", lines=10, elem_classes="result-box",
+                    )
+                    mic_polished_output = gr.Textbox(
+                        label="✨ 润色结果", lines=10, elem_classes="result-box",
+                    )
                 mic_btn.click(
                     transcribe_mic,
                     inputs=[mic_input, api_key_input, model_input, lang_input, polish_toggle],
-                    outputs=mic_output,
+                    outputs=[mic_raw_output, mic_polished_output],
                 )
 
             # Tab 3: 实时流式
@@ -360,23 +366,27 @@ def build_ui():
                     start_btn = gr.Button("🎤 开始录音", variant="primary")
                     stop_btn = gr.Button("⏹ 停止", interactive=False)
                     refresh_btn = gr.Button("🔄 刷新结果")
-                realtime_output = gr.Textbox(
-                    label="实时识别结果", lines=12, elem_classes="result-box",
-                )
+                with gr.Row():
+                    realtime_raw_output = gr.Textbox(
+                        label="原始识别", lines=12, elem_classes="result-box",
+                    )
+                    realtime_polished_output = gr.Textbox(
+                        label="✨ 润色结果", lines=12, elem_classes="result-box",
+                    )
 
                 start_btn.click(
                     start_realtime,
                     inputs=[api_key_input, model_input],
-                    outputs=[realtime_output, stop_btn, start_btn],
+                    outputs=[realtime_raw_output, realtime_polished_output, stop_btn, start_btn],
                 )
                 stop_btn.click(
                     stop_realtime,
                     inputs=[api_key_input, polish_toggle],
-                    outputs=[realtime_output, stop_btn, start_btn],
+                    outputs=[realtime_raw_output, realtime_polished_output, stop_btn, start_btn],
                 )
                 refresh_btn.click(
                     poll_realtime,
-                    outputs=realtime_output,
+                    outputs=realtime_raw_output,
                 )
 
     return demo
