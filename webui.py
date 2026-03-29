@@ -562,11 +562,9 @@ def build_ui():
                 with gr.Row():
                     file_raw_output = gr.Textbox(
                         label="原始识别", lines=10, elem_classes="result-box",
-                        show_copy_button=True,
                     )
                     file_polished_output = gr.Textbox(
                         label="✨ 润色结果", lines=10, elem_classes="result-box",
-                        show_copy_button=True,
                     )
                 with gr.Row():
                     file_copy_raw = gr.Button("📋 复制原始识别", scale=1)
@@ -590,11 +588,9 @@ def build_ui():
                 with gr.Row():
                     mic_raw_output = gr.Textbox(
                         label="原始识别", lines=10, elem_classes="result-box",
-                        show_copy_button=True,
                     )
                     mic_polished_output = gr.Textbox(
                         label="✨ 润色结果", lines=10, elem_classes="result-box",
-                        show_copy_button=True,
                     )
                 with gr.Row():
                     mic_copy_raw = gr.Button("📋 复制原始识别", scale=1)
@@ -617,11 +613,9 @@ def build_ui():
                 with gr.Row():
                     realtime_raw_output = gr.Textbox(
                         label="原始识别", lines=12, elem_classes="result-box",
-                        show_copy_button=True,
                     )
                     realtime_polished_output = gr.Textbox(
                         label="✨ 润色结果", lines=12, elem_classes="result-box",
-                        show_copy_button=True,
                     )
                 with gr.Row():
                     rt_copy_raw = gr.Button("📋 复制原始识别", scale=1)
