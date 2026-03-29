@@ -518,8 +518,11 @@ MODELS = [
 
 LANGUAGES = ["auto", "zh", "en", "ja"]
 
+COPY_JS = "(text) => { navigator.clipboard.writeText(text || ''); }"
+
 CSS = """
 .result-box { min-height: 200px; }
+.copy-btn { min-height: 44px !important; font-size: 16px !important; }
 footer { display: none !important; }
 """
 
@@ -559,10 +562,17 @@ def build_ui():
                 with gr.Row():
                     file_raw_output = gr.Textbox(
                         label="原始识别", lines=10, elem_classes="result-box",
+                        show_copy_button=True,
                     )
                     file_polished_output = gr.Textbox(
                         label="✨ 润色结果", lines=10, elem_classes="result-box",
+                        show_copy_button=True,
                     )
+                with gr.Row():
+                    file_copy_raw = gr.Button("📋 复制原始识别", scale=1)
+                    file_copy_pol = gr.Button("📋 复制润色结果", variant="primary", scale=1, elem_classes="copy-btn")
+                file_copy_raw.click(fn=None, inputs=[file_raw_output], js=COPY_JS)
+                file_copy_pol.click(fn=None, inputs=[file_polished_output], js=COPY_JS)
                 file_btn.click(
                     transcribe_file,
                     inputs=[file_input, api_key_input, model_input, lang_input, polish_toggle],
@@ -580,10 +590,17 @@ def build_ui():
                 with gr.Row():
                     mic_raw_output = gr.Textbox(
                         label="原始识别", lines=10, elem_classes="result-box",
+                        show_copy_button=True,
                     )
                     mic_polished_output = gr.Textbox(
                         label="✨ 润色结果", lines=10, elem_classes="result-box",
+                        show_copy_button=True,
                     )
+                with gr.Row():
+                    mic_copy_raw = gr.Button("📋 复制原始识别", scale=1)
+                    mic_copy_pol = gr.Button("📋 复制润色结果", variant="primary", scale=1, elem_classes="copy-btn")
+                mic_copy_raw.click(fn=None, inputs=[mic_raw_output], js=COPY_JS)
+                mic_copy_pol.click(fn=None, inputs=[mic_polished_output], js=COPY_JS)
                 mic_btn.click(
                     transcribe_mic,
                     inputs=[mic_input, api_key_input, model_input, lang_input, polish_toggle],
@@ -600,10 +617,17 @@ def build_ui():
                 with gr.Row():
                     realtime_raw_output = gr.Textbox(
                         label="原始识别", lines=12, elem_classes="result-box",
+                        show_copy_button=True,
                     )
                     realtime_polished_output = gr.Textbox(
                         label="✨ 润色结果", lines=12, elem_classes="result-box",
+                        show_copy_button=True,
                     )
+                with gr.Row():
+                    rt_copy_raw = gr.Button("📋 复制原始识别", scale=1)
+                    rt_copy_pol = gr.Button("📋 复制润色结果", variant="primary", scale=1, elem_classes="copy-btn")
+                rt_copy_raw.click(fn=None, inputs=[realtime_raw_output], js=COPY_JS)
+                rt_copy_pol.click(fn=None, inputs=[realtime_polished_output], js=COPY_JS)
 
                 start_btn.click(
                     start_realtime,
