@@ -284,13 +284,102 @@ def transcribe_mic(audio_data, api_key, model, language, enable_polish=False):
 
 # ─── 功能3：实时流式识别（系统麦克风） ───
 
-import pyaudio
+IS_WINDOWS = sys.platform == "win32"
+
+
+class MicRecorder:
+    """麦克风录音抽象层，根据平台自动选择后端"""
+
+    def open(self):
+        raise NotImplementedError
+
+    def read(self) -> bytes:
+        raise NotImplementedError
+
+    def close(self):
+        raise NotImplementedError
+
+
+class PyAudioRecorder(MicRecorder):
+    """Windows / macOS: 使用 pyaudio 直接采集 16kHz PCM"""
+
+    def __init__(self):
+        import pyaudio
+        self._pyaudio = pyaudio
+        self._pa = None
+        self._stream = None
+        self._chunk = int(TARGET_RATE * 0.1)
+
+    def open(self):
+        self._pa = self._pyaudio.PyAudio()
+        self._stream = self._pa.open(
+            format=self._pyaudio.paInt16,
+            channels=1,
+            rate=TARGET_RATE,
+            input=True,
+            frames_per_buffer=self._chunk,
+        )
+
+    def read(self) -> bytes:
+        return self._stream.read(self._chunk, exception_on_overflow=False)
+
+    def close(self):
+        if self._stream:
+            try:
+                self._stream.stop_stream()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        if self._pa:
+            self._pa.terminate()
+            self._pa = None
+
+
+class PipeWireRecorder(MicRecorder):
+    """Linux: 使用 pw-record 采集 48kHz 后降采样到 16kHz"""
+
+    def __init__(self):
+        self._proc = None
+        self._mic_rate = 48000
+        self._chunk_bytes = int(self._mic_rate * 0.1) * 2
+        self._ratio = self._mic_rate / TARGET_RATE
+
+    def open(self):
+        self._proc = subprocess.Popen(
+            ["pw-record", "--format", "s16", "--rate", "48000", "--channels", "1", "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+
+    def read(self) -> bytes:
+        data = self._proc.stdout.read(self._chunk_bytes)
+        if not data:
+            return b""
+        samples = struct.unpack(f"<{len(data) // 2}h", data)
+        out = []
+        pos = 0.0
+        while int(pos) < len(samples):
+            out.append(samples[int(pos)])
+            pos += self._ratio
+        return struct.pack(f"<{len(out)}h", *out)
+
+    def close(self):
+        if self._proc:
+            self._proc.terminate()
+            self._proc.wait()
+            self._proc = None
+
+
+def _create_mic_recorder() -> MicRecorder:
+    if IS_WINDOWS:
+        return PyAudioRecorder()
+    return PipeWireRecorder()
+
 
 class RealtimeSession:
     def __init__(self):
         self.recognition = None
-        self.pa = None
-        self.stream = None
+        self.recorder: MicRecorder | None = None
         self.running = False
         self.sentences = []
         self.current_text = ""
@@ -308,26 +397,13 @@ class RealtimeSession:
 
         class StreamCallback(RecognitionCallback):
             def on_open(self) -> None:
-                session.pa = pyaudio.PyAudio()
-                session.stream = session.pa.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=TARGET_RATE,
-                    input=True,
-                    frames_per_buffer=int(TARGET_RATE * 0.1),
-                )
+                session.recorder = _create_mic_recorder()
+                session.recorder.open()
 
             def on_close(self) -> None:
-                if session.stream:
-                    try:
-                        session.stream.stop_stream()
-                        session.stream.close()
-                    except Exception:
-                        pass
-                    session.stream = None
-                if session.pa:
-                    session.pa.terminate()
-                    session.pa = None
+                if session.recorder:
+                    session.recorder.close()
+                    session.recorder = None
 
             def on_complete(self) -> None:
                 pass
@@ -355,11 +431,12 @@ class RealtimeSession:
         self.recognition.start()
 
         def feed_audio():
-            chunk_frames = int(TARGET_RATE * 0.1)
-            while session.running and session.stream:
+            while session.running and session.recorder:
                 try:
-                    data = session.stream.read(chunk_frames, exception_on_overflow=False)
+                    data = session.recorder.read()
                 except Exception:
+                    break
+                if not data:
                     break
                 try:
                     session.recognition.send_audio_frame(data)
