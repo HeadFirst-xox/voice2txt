@@ -30,6 +30,7 @@ from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionRes
 
 from polish import polish_text
 
+IS_WINDOWS = sys.platform == "win32"
 TARGET_RATE = 16000
 API_MODEL = "fun-asr-realtime"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -104,7 +105,7 @@ def _read_pid() -> int | None:
             pid = int(f.read().strip())
         os.kill(pid, 0)
         return pid
-    except (FileNotFoundError, ValueError, ProcessLookupError):
+    except (FileNotFoundError, ValueError, ProcessLookupError, OSError):
         _cleanup_pid()
         return None
 
@@ -114,7 +115,10 @@ def _cmd_stop():
     if pid is None:
         print("没有找到运行中的 WebUI 进程")
         sys.exit(1)
-    os.kill(pid, signal.SIGTERM)
+    if IS_WINDOWS:
+        os.kill(pid, signal.SIGBREAK)
+    else:
+        os.kill(pid, signal.SIGTERM)
     print(f"已停止 WebUI (PID: {pid})")
     _cleanup_pid()
     sys.exit(0)
@@ -131,20 +135,36 @@ def _cmd_status():
 
 
 def _daemonize():
-    pid = os.fork()
-    if pid > 0:
-        print(f"WebUI 已在后台启动 (PID: {pid})")
+    if IS_WINDOWS:
+        import webbrowser
+        log = open(LOG_FILE, "a")
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__),
+             "--port", str(DEFAULT_PORT)],
+            stdout=log, stderr=log,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        print(f"WebUI 已在后台启动 (PID: {proc.pid})")
         print(f"访问: http://localhost:{DEFAULT_PORT}")
         print(f"停止: python webui.py --stop")
-
-        import webbrowser
-        time.sleep(1)
+        time.sleep(2)
         webbrowser.open(f"http://localhost:{DEFAULT_PORT}")
         sys.exit(0)
-    os.setsid()
-    with open(LOG_FILE, "a") as log:
-        os.dup2(log.fileno(), sys.stdout.fileno())
-        os.dup2(log.fileno(), sys.stderr.fileno())
+    else:
+        pid = os.fork()
+        if pid > 0:
+            print(f"WebUI 已在后台启动 (PID: {pid})")
+            print(f"访问: http://localhost:{DEFAULT_PORT}")
+            print(f"停止: python webui.py --stop")
+
+            import webbrowser
+            time.sleep(1)
+            webbrowser.open(f"http://localhost:{DEFAULT_PORT}")
+            sys.exit(0)
+        os.setsid()
+        with open(LOG_FILE, "a") as log:
+            os.dup2(log.fileno(), sys.stdout.fileno())
+            os.dup2(log.fileno(), sys.stderr.fileno())
 
 
 def get_api_key():
@@ -283,8 +303,6 @@ def transcribe_mic(audio_data, api_key, model, language, enable_polish=False):
 
 
 # ─── 功能3：实时流式识别（系统麦克风） ───
-
-IS_WINDOWS = sys.platform == "win32"
 
 
 class MicRecorder:

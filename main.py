@@ -2,10 +2,10 @@
 """
 麦克风实时语音转文字工具
 基于阿里云百炼平台 Fun-ASR 实时语音识别 API
-通过 PipeWire (pw-record) 采集麦克风音频
+Windows 使用 pyaudio、Linux 使用 PipeWire (pw-record) 采集麦克风音频
 
 使用方式:
-  1. 设置环境变量: export DASHSCOPE_API_KEY="sk-xxx"
+  1. 设置环境变量: export DASHSCOPE_API_KEY="sk-xxx"  (Windows: set DASHSCOPE_API_KEY=sk-xxx)
   2. 运行: python main.py
   3. 对着麦克风说话，实时输出识别文字
   4. 按 Ctrl+C 停止
@@ -23,20 +23,20 @@ from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionRes
 
 from polish import polish_text
 
+IS_WINDOWS = sys.platform == "win32"
 MIC_RATE = 48000
 TARGET_RATE = 16000
 CHANNELS = 1
-CHUNK_BYTES = 9600  # 48000Hz * 16bit * 100ms = 9600 bytes
 
 recognition: Recognition | None = None
-recorder: subprocess.Popen | None = None
+mic_stream = None  # PyAudio stream (Windows) 或 Popen (Linux)
+pa_instance = None  # PyAudio 实例 (仅 Windows)
 output_file = None
 final_texts: list[str] = []
 enable_polish = False
 
 
 def downsample_pcm16(data: bytes, from_rate: int, to_rate: int) -> bytes:
-    """将 PCM16 音频从 from_rate 降采样到 to_rate"""
     if from_rate == to_rate:
         return data
     ratio = from_rate / to_rate
@@ -49,28 +49,71 @@ def downsample_pcm16(data: bytes, from_rate: int, to_rate: int) -> bytes:
     return struct.pack(f"<{len(out)}h", *out)
 
 
-class RealtimeCallback(RecognitionCallback):
-    def on_open(self) -> None:
-        global recorder
-        recorder = subprocess.Popen(
-            [
-                "pw-record",
-                "--format", "s16",
-                "--rate", str(MIC_RATE),
-                "--channels", str(CHANNELS),
-                "-",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+def open_mic():
+    """打开麦克风，返回后可通过 read_mic() 读取数据"""
+    global mic_stream, pa_instance
+    if IS_WINDOWS:
+        import pyaudio
+        pa_instance = pyaudio.PyAudio()
+        mic_stream = pa_instance.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=TARGET_RATE,
+            input=True,
+            frames_per_buffer=int(TARGET_RATE * 0.1),
+        )
+        print(f"🎤 麦克风已就绪 (pyaudio {TARGET_RATE}Hz)，开始说话吧... (Ctrl+C 停止)\n")
+    else:
+        mic_stream = subprocess.Popen(
+            ["pw-record", "--format", "s16", "--rate", str(MIC_RATE),
+             "--channels", str(CHANNELS), "-"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
         print(f"🎤 麦克风已就绪 ({MIC_RATE}Hz -> {TARGET_RATE}Hz)，开始说话吧... (Ctrl+C 停止)\n")
 
+
+def read_mic() -> bytes:
+    """从麦克风读取一帧 PCM16 数据（已降采样到 TARGET_RATE）"""
+    if IS_WINDOWS:
+        chunk = int(TARGET_RATE * 0.1)
+        return mic_stream.read(chunk, exception_on_overflow=False)
+    else:
+        chunk_bytes = int(MIC_RATE * 0.1) * 2
+        data = mic_stream.stdout.read(chunk_bytes)
+        if not data:
+            return b""
+        return downsample_pcm16(data, MIC_RATE, TARGET_RATE)
+
+
+def close_mic():
+    global mic_stream, pa_instance
+    if IS_WINDOWS:
+        if mic_stream:
+            try:
+                mic_stream.stop_stream()
+                mic_stream.close()
+            except Exception:
+                pass
+            mic_stream = None
+        if pa_instance:
+            pa_instance.terminate()
+            pa_instance = None
+    else:
+        if mic_stream:
+            try:
+                mic_stream.terminate()
+                mic_stream.wait()
+            except Exception:
+                pass
+            mic_stream = None
+
+
+class RealtimeCallback(RecognitionCallback):
+    def on_open(self) -> None:
+        open_mic()
+
     def on_close(self) -> None:
-        global recorder
-        if recorder:
-            recorder.terminate()
-            recorder.wait()
-            recorder = None
+        close_mic()
 
     def on_complete(self) -> None:
         print("\n✅ 识别完成")
@@ -99,14 +142,7 @@ class RealtimeCallback(RecognitionCallback):
 
 
 def cleanup():
-    global recorder
-    if recorder:
-        try:
-            recorder.terminate()
-            recorder.wait()
-        except Exception:
-            pass
-        recorder = None
+    close_mic()
     if output_file:
         output_file.close()
 
@@ -188,10 +224,12 @@ def main():
         output_file = open(args.output, "a", encoding="utf-8")
         print(f"📄 识别结果将保存到: {args.output}")
 
+    backend = "pyaudio" if IS_WINDOWS else "pw-record"
     print(f"🔧 模型: {args.model}")
+    print(f"🔧 录音后端: {backend}")
     if enable_polish:
         print(f"🔧 润色: 已启用 (qwen-turbo-latest)")
-    print(f"🔧 采样率: {MIC_RATE}Hz -> {TARGET_RATE}Hz, 格式: PCM, 单声道")
+    print(f"🔧 输出采样率: {TARGET_RATE}Hz, 格式: PCM, 单声道")
     print("─" * 50)
 
     callback = RealtimeCallback()
@@ -207,11 +245,10 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     while True:
-        if recorder and recorder.stdout:
-            data = recorder.stdout.read(CHUNK_BYTES)
+        if mic_stream:
+            data = read_mic()
             if not data:
                 break
-            data = downsample_pcm16(data, MIC_RATE, TARGET_RATE)
             try:
                 recognition.send_audio_frame(data)
             except Exception:
