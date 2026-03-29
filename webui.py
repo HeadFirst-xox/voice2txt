@@ -282,12 +282,15 @@ def transcribe_mic(audio_data, api_key, model, language, enable_polish=False):
     return result
 
 
-# ─── 功能3：实时流式识别（PipeWire 麦克风） ───
+# ─── 功能3：实时流式识别（系统麦克风） ───
+
+import pyaudio
 
 class RealtimeSession:
     def __init__(self):
         self.recognition = None
-        self.recorder = None
+        self.pa = None
+        self.stream = None
         self.running = False
         self.sentences = []
         self.current_text = ""
@@ -305,16 +308,26 @@ class RealtimeSession:
 
         class StreamCallback(RecognitionCallback):
             def on_open(self) -> None:
-                session.recorder = subprocess.Popen(
-                    ["pw-record", "--format", "s16", "--rate", "48000", "--channels", "1", "-"],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                session.pa = pyaudio.PyAudio()
+                session.stream = session.pa.open(
+                    format=pyaudio.paInt16,
+                    channels=1,
+                    rate=TARGET_RATE,
+                    input=True,
+                    frames_per_buffer=int(TARGET_RATE * 0.1),
                 )
 
             def on_close(self) -> None:
-                if session.recorder:
-                    session.recorder.terminate()
-                    session.recorder.wait()
-                    session.recorder = None
+                if session.stream:
+                    try:
+                        session.stream.stop_stream()
+                        session.stream.close()
+                    except Exception:
+                        pass
+                    session.stream = None
+                if session.pa:
+                    session.pa.terminate()
+                    session.pa = None
 
             def on_complete(self) -> None:
                 pass
@@ -342,22 +355,14 @@ class RealtimeSession:
         self.recognition.start()
 
         def feed_audio():
-            mic_rate = 48000
-            chunk_bytes = int(mic_rate * 0.1) * 2
-            ratio = mic_rate / TARGET_RATE
-            while session.running and session.recorder and session.recorder.stdout:
-                data = session.recorder.stdout.read(chunk_bytes)
-                if not data:
-                    break
-                samples = struct.unpack(f"<{len(data) // 2}h", data)
-                out = []
-                pos = 0.0
-                while int(pos) < len(samples):
-                    out.append(samples[int(pos)])
-                    pos += ratio
-                downsampled = struct.pack(f"<{len(out)}h", *out)
+            chunk_frames = int(TARGET_RATE * 0.1)
+            while session.running and session.stream:
                 try:
-                    session.recognition.send_audio_frame(downsampled)
+                    data = session.stream.read(chunk_frames, exception_on_overflow=False)
+                except Exception:
+                    break
+                try:
+                    session.recognition.send_audio_frame(data)
                 except Exception:
                     break
 
@@ -492,7 +497,7 @@ def build_ui():
 
             # Tab 3: 实时流式
             with gr.Tab("⚡ 实时识别（系统麦克风）"):
-                gr.Markdown("使用系统麦克风（PipeWire）进行实时流式语音识别，边说边出文字。")
+                gr.Markdown("使用系统麦克风进行实时流式语音识别，边说边出文字。")
                 with gr.Row():
                     start_btn = gr.Button("🎤 开始录音", variant="primary")
                     stop_btn = gr.Button("⏹ 停止", interactive=False)
