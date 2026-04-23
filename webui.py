@@ -99,15 +99,51 @@ def _cleanup_pid():
         pass
 
 
+def _win_process_exists(pid: int) -> bool:
+    """Windows 上不能用 os.kill(pid,0) 可靠判断进程是否存在，会误报 WinError 87。"""
+    if pid <= 0:
+        return False
+    import ctypes
+    k = ctypes.windll.kernel32
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+    if h:
+        k.CloseHandle(h)
+        return True
+    if k.GetLastError() == 5:  # ERROR_ACCESS_DENIED，进程在但本进程无权限句柄
+        return True
+    return False
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if IS_WINDOWS:
+        return _win_process_exists(pid)
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OSError, PermissionError):
+        return False
+    return True
+
+
 def _read_pid() -> int | None:
     try:
         with open(PID_FILE) as f:
-            pid = int(f.read().strip())
-        os.kill(pid, 0)
-        return pid
-    except (FileNotFoundError, ValueError, ProcessLookupError, OSError):
+            raw = f.read().strip()
+        if not raw:
+            _cleanup_pid()
+            return None
+        pid = int(raw)
+    except FileNotFoundError:
+        return None
+    except ValueError:
         _cleanup_pid()
         return None
+    if not _pid_is_alive(pid):
+        _cleanup_pid()
+        return None
+    return pid
 
 
 def _cmd_stop():
@@ -546,7 +582,7 @@ def build_ui():
                 label="语言", choices=LANGUAGES, value="auto", scale=1,
             )
             polish_toggle = gr.Checkbox(
-                label="✨ 润色", value=False,
+                label="✨ 润色", value=True,
                 info="使用 LLM 去除口头禅、润色语序",
                 scale=1,
             )
