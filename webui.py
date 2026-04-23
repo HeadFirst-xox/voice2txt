@@ -22,6 +22,7 @@ import argparse
 import tempfile
 import threading
 import subprocess
+from pathlib import Path
 
 import dashscope
 import gradio as gr
@@ -36,6 +37,7 @@ API_MODEL = "fun-asr-realtime"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PID_FILE = os.path.join(BASE_DIR, ".webui.pid")
 LOG_FILE = os.path.join(BASE_DIR, "webui.log")
+API_KEY_FILE = os.path.join(BASE_DIR, ".dashscope_api_key")
 DEFAULT_PORT = 7860
 DEFAULT_IDLE_TIMEOUT = 300
 
@@ -204,7 +206,23 @@ def _daemonize():
 
 
 def get_api_key():
-    return os.environ.get("DASHSCOPE_API_KEY", "")
+    env_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    try:
+        return Path(API_KEY_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def save_api_key(api_key: str):
+    key = (api_key or "").strip()
+    if not key:
+        return
+    try:
+        Path(API_KEY_FILE).write_text(key, encoding="utf-8")
+    except OSError as e:
+        print(f"⚠️ 保存 API Key 失败: {e}")
 
 
 def init_dashscope(api_key: str):
@@ -237,6 +255,7 @@ def transcribe_file(audio_path, api_key, model, language, enable_polish=False):
     """返回 (原始识别文本, 润色文本)，润色未启用时第二项为空"""
     if not api_key:
         return "❌ 请先填写 API Key", ""
+    save_api_key(api_key)
     if not audio_path:
         return "❌ 请先上传音频文件", ""
 
@@ -524,6 +543,7 @@ realtime_session = RealtimeSession()
 def start_realtime(api_key, model):
     if not api_key:
         return "❌ 请先填写 API Key", "", gr.update(interactive=False), gr.update(interactive=True)
+    save_api_key(api_key)
     realtime_session.start(api_key, model)
     return "🎤 正在录音...", "", gr.update(interactive=True), gr.update(interactive=False)
 
