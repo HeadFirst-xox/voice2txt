@@ -14,6 +14,7 @@
 import os
 import sys
 import io
+import json
 import time
 import signal
 import struct
@@ -63,7 +64,7 @@ class IdleWatchdog:
             while not self._stop.wait(15):
                 idle = time.time() - self.last_activity
                 if idle >= self.timeout:
-                    print(f"\n⏹ 空闲 {int(idle)}s，自动关闭服务")
+                    safe_print(f"\n空闲 {int(idle)}s，自动关闭服务")
                     _cleanup_pid()
                     os._exit(0)
 
@@ -77,6 +78,22 @@ class IdleWatchdog:
 idle_watchdog = IdleWatchdog(0)
 
 
+def safe_print(*args, **kwargs):
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        file = kwargs.get("file", sys.stdout)
+        flush = kwargs.get("flush", False)
+        encoding = getattr(file, "encoding", None) or "utf-8"
+        text = sep.join(str(arg) for arg in args)
+        fallback = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        file.write(fallback + end)
+        if flush:
+            file.flush()
+
+
 def with_activity(fn):
     """装饰器：调用时刷新空闲计时"""
     def wrapper(*args, **kwargs):
@@ -88,9 +105,13 @@ def with_activity(fn):
 
 # ─── 进程管理 ───
 
-def _write_pid():
-    with open(PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
+def _write_pid(port: int):
+    payload = {
+        "pid": os.getpid(),
+        "port": port,
+    }
+    with open(PID_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
     atexit.register(_cleanup_pid)
 
 
@@ -129,75 +150,142 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def _read_pid() -> int | None:
+def _read_pid_file() -> dict | None:
     try:
-        with open(PID_FILE) as f:
+        with open(PID_FILE, encoding="utf-8") as f:
             raw = f.read().strip()
         if not raw:
             _cleanup_pid()
             return None
-        pid = int(raw)
     except FileNotFoundError:
         return None
-    except ValueError:
+    try:
+        if raw.startswith("{"):
+            data = json.loads(raw)
+            pid = int(data["pid"])
+            port = int(data.get("port", DEFAULT_PORT))
+        else:
+            pid = int(raw)
+            port = DEFAULT_PORT
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         _cleanup_pid()
         return None
+    if pid <= 0 or port <= 0:
+        _cleanup_pid()
+        return None
+    return {"pid": pid, "port": port}
+
+
+def _read_process_commandline(pid: int) -> str:
+    if pid <= 0:
+        return ""
+    if IS_WINDOWS:
+        query = (
+            f'$p = Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; '
+            "if ($p) { $p.CommandLine }"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", query],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout.strip()
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode(errors="ignore").strip()
+    except OSError:
+        return ""
+
+
+def _port_is_listening(port: int) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _pid_matches_webui(pid_info: dict) -> bool:
+    pid = pid_info["pid"]
+    port = pid_info["port"]
     if not _pid_is_alive(pid):
+        return False
+    commandline = _read_process_commandline(pid).lower()
+    if not commandline:
+        return False
+    script_name = os.path.basename(__file__).lower()
+    if script_name not in commandline:
+        return False
+    return _port_is_listening(port)
+
+
+def _read_pid() -> dict | None:
+    pid_info = _read_pid_file()
+    if not pid_info:
+        return None
+    if not _pid_matches_webui(pid_info):
         _cleanup_pid()
         return None
-    return pid
+    return pid_info
 
 
 def _cmd_stop():
-    pid = _read_pid()
-    if pid is None:
-        print("没有找到运行中的 WebUI 进程")
+    pid_info = _read_pid()
+    if pid_info is None:
+        safe_print("没有找到运行中的 WebUI 进程")
         sys.exit(1)
+    pid = pid_info["pid"]
     if IS_WINDOWS:
         os.kill(pid, signal.SIGBREAK)
     else:
         os.kill(pid, signal.SIGTERM)
-    print(f"已停止 WebUI (PID: {pid})")
+    safe_print(f"已停止 WebUI (PID: {pid})")
     _cleanup_pid()
     sys.exit(0)
 
 
 def _cmd_status():
-    pid = _read_pid()
-    if pid:
-        print(f"WebUI 正在运行 (PID: {pid})")
-        print(f"访问: http://localhost:{DEFAULT_PORT}")
+    pid_info = _read_pid()
+    if pid_info:
+        safe_print(f"WebUI 正在运行 (PID: {pid_info['pid']})")
+        safe_print(f"访问: http://localhost:{pid_info['port']}")
     else:
-        print("WebUI 未运行")
+        safe_print("WebUI 未运行")
     sys.exit(0)
 
 
-def _daemonize():
+def _daemonize(port: int):
     if IS_WINDOWS:
         import webbrowser
         log = open(LOG_FILE, "a")
         proc = subprocess.Popen(
             [sys.executable, os.path.abspath(__file__),
-             "--port", str(DEFAULT_PORT)],
+             "--port", str(port)],
             stdout=log, stderr=log,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        print(f"WebUI 已在后台启动 (PID: {proc.pid})")
-        print(f"访问: http://localhost:{DEFAULT_PORT}")
-        print(f"停止: python webui.py --stop")
+        safe_print(f"WebUI 已在后台启动 (PID: {proc.pid})")
+        safe_print(f"访问: http://localhost:{port}")
+        safe_print("停止: python webui.py --stop")
         time.sleep(2)
-        webbrowser.open(f"http://localhost:{DEFAULT_PORT}")
+        webbrowser.open(f"http://localhost:{port}")
         sys.exit(0)
     else:
         pid = os.fork()
         if pid > 0:
-            print(f"WebUI 已在后台启动 (PID: {pid})")
-            print(f"访问: http://localhost:{DEFAULT_PORT}")
-            print(f"停止: python webui.py --stop")
+            safe_print(f"WebUI 已在后台启动 (PID: {pid})")
+            safe_print(f"访问: http://localhost:{port}")
+            safe_print("停止: python webui.py --stop")
 
             import webbrowser
             time.sleep(1)
-            webbrowser.open(f"http://localhost:{DEFAULT_PORT}")
+            webbrowser.open(f"http://localhost:{port}")
             sys.exit(0)
         os.setsid()
         with open(LOG_FILE, "a") as log:
@@ -222,7 +310,7 @@ def save_api_key(api_key: str):
     try:
         Path(API_KEY_FILE).write_text(key, encoding="utf-8")
     except OSError as e:
-        print(f"⚠️ 保存 API Key 失败: {e}")
+        safe_print(f"保存 API Key 失败: {e}")
 
 
 def init_dashscope(api_key: str):
@@ -732,7 +820,9 @@ if __name__ == "__main__":
 
     existing = _read_pid()
     if existing:
-        print(f"WebUI 已在运行 (PID: {existing})，先执行 python webui.py --stop")
+        safe_print(
+            f"WebUI 已在运行 (PID: {existing['pid']}, 端口: {existing['port']})，先执行 python webui.py --stop"
+        )
         sys.exit(1)
 
     timeout = args.idle_timeout
@@ -740,14 +830,14 @@ if __name__ == "__main__":
         timeout = DEFAULT_IDLE_TIMEOUT if args.daemon else 0
 
     if args.daemon:
-        _daemonize()
+        _daemonize(args.port)
 
-    _write_pid()
+    _write_pid(args.port)
     idle_watchdog.timeout = timeout
     idle_watchdog.start()
 
     if timeout > 0:
-        print(f"🔧 空闲自动关闭: {timeout}s")
+        safe_print(f"空闲自动关闭: {timeout}s")
 
     demo = build_ui()
     demo.launch(

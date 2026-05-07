@@ -36,6 +36,22 @@ final_texts: list[str] = []
 enable_polish = False
 
 
+def safe_print(*args, **kwargs):
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        file = kwargs.get("file", sys.stdout)
+        flush = kwargs.get("flush", False)
+        encoding = getattr(file, "encoding", None) or "utf-8"
+        text = sep.join(str(arg) for arg in args)
+        fallback = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        file.write(fallback + end)
+        if flush:
+            file.flush()
+
+
 def downsample_pcm16(data: bytes, from_rate: int, to_rate: int) -> bytes:
     if from_rate == to_rate:
         return data
@@ -62,14 +78,14 @@ def open_mic():
             input=True,
             frames_per_buffer=int(TARGET_RATE * 0.1),
         )
-        print(f"🎤 麦克风已就绪 (pyaudio {TARGET_RATE}Hz)，开始说话吧... (Ctrl+C 停止)\n")
+        safe_print(f"麦克风已就绪 (pyaudio {TARGET_RATE}Hz)，开始说话吧... (Ctrl+C 停止)\n")
     else:
         mic_stream = subprocess.Popen(
             ["pw-record", "--format", "s16", "--rate", str(MIC_RATE),
              "--channels", str(CHANNELS), "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
-        print(f"🎤 麦克风已就绪 ({MIC_RATE}Hz -> {TARGET_RATE}Hz)，开始说话吧... (Ctrl+C 停止)\n")
+        safe_print(f"麦克风已就绪 ({MIC_RATE}Hz -> {TARGET_RATE}Hz)，开始说话吧... (Ctrl+C 停止)\n")
 
 
 def read_mic() -> bytes:
@@ -116,10 +132,10 @@ class RealtimeCallback(RecognitionCallback):
         close_mic()
 
     def on_complete(self) -> None:
-        print("\n✅ 识别完成")
+        safe_print("\n识别完成")
 
     def on_error(self, message) -> None:
-        print(f"\n❌ 识别错误: {message.message} (request_id: {message.request_id})")
+        safe_print(f"\n识别错误: {message.message} (request_id: {message.request_id})")
         cleanup()
         sys.exit(1)
 
@@ -148,25 +164,25 @@ def cleanup():
 
 
 def signal_handler(sig, frame):
-    print("\n\n⏹  停止识别...")
+    safe_print("\n\n停止识别...")
     if recognition:
         recognition.stop()
         req_id = recognition.get_last_request_id()
         first_delay = recognition.get_first_package_delay()
         last_delay = recognition.get_last_package_delay()
-        print(f"   request_id: {req_id}")
-        print(f"   首包延迟: {first_delay}ms, 尾包延迟: {last_delay}ms")
+        safe_print(f"   request_id: {req_id}")
+        safe_print(f"   首包延迟: {first_delay}ms, 尾包延迟: {last_delay}ms")
 
     if final_texts:
-        print(f"\n📝 共识别 {len(final_texts)} 句:")
+        safe_print(f"\n共识别 {len(final_texts)} 句:")
         for i, t in enumerate(final_texts, 1):
-            print(f"   {i}. {t}")
+            safe_print(f"   {i}. {t}")
 
         if enable_polish:
             raw = "".join(final_texts)
-            print("\n✨ 正在润色...")
+            safe_print("\n正在润色...")
             polished = polish_text(raw, dashscope.api_key)
-            print(f"\n📝 润色结果:\n   {polished}")
+            safe_print(f"\n润色结果:\n   {polished}")
             if output_file:
                 output_file.write(f"\n--- 润色结果 ---\n{polished}\n")
                 output_file.flush()
@@ -208,9 +224,9 @@ def main():
 
     api_key = args.api_key or os.environ.get("DASHSCOPE_API_KEY")
     if not api_key:
-        print("❌ 请设置 API Key:")
-        print("   export DASHSCOPE_API_KEY='sk-xxx'")
-        print("   或使用 --api-key 参数")
+        safe_print("请设置 API Key:")
+        safe_print("   export DASHSCOPE_API_KEY='sk-xxx'")
+        safe_print("   或使用 --api-key 参数")
         sys.exit(1)
 
     dashscope.api_key = api_key
@@ -222,15 +238,15 @@ def main():
 
     if args.output:
         output_file = open(args.output, "a", encoding="utf-8")
-        print(f"📄 识别结果将保存到: {args.output}")
+        safe_print(f"识别结果将保存到: {args.output}")
 
     backend = "pyaudio" if IS_WINDOWS else "pw-record"
-    print(f"🔧 模型: {args.model}")
-    print(f"🔧 录音后端: {backend}")
+    safe_print(f"模型: {args.model}")
+    safe_print(f"录音后端: {backend}")
     if enable_polish:
-        print(f"🔧 润色: 已启用 (qwen-turbo-latest)")
-    print(f"🔧 输出采样率: {TARGET_RATE}Hz, 格式: PCM, 单声道")
-    print("─" * 50)
+        safe_print("润色: 已启用 (qwen-turbo-latest)")
+    safe_print(f"输出采样率: {TARGET_RATE}Hz, 格式: PCM, 单声道")
+    safe_print("-" * 50)
 
     callback = RealtimeCallback()
     recognition = Recognition(

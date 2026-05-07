@@ -5,6 +5,7 @@
 """
 
 import json
+import sys
 import urllib.request
 
 POLISH_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
@@ -56,5 +57,11 @@ def polish_text(raw: str, api_key: str) -> str:
             polished = result["choices"][0]["message"]["content"].strip()
             return polished if polished else raw
     except Exception as e:
-        print(f"⚠️ 润色失败，返回原始文本: {e}")
+        message = f"润色失败，返回原始文本: {e}"
+        try:
+            print(message)
+        except UnicodeEncodeError:
+            encoding = getattr(sys.stderr, "encoding", None) or "utf-8"
+            fallback = message.encode(encoding, errors="replace").decode(encoding, errors="replace")
+            sys.stderr.write(fallback + "\n")
         return raw
