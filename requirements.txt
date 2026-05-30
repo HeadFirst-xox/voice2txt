@@ -2,4 +2,4 @@ dashscope>=1.23.1
 pyaudio
 gradio>=4.0
 numpy
-starlette>=0.40.0,<1.0.0
+starlette>=0.40.0,<0.47.0

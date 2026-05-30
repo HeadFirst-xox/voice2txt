@@ -6,7 +6,7 @@ Windows 使用 pyaudio、Linux 使用 PipeWire (pw-record) 采集麦克风音频
 
 使用方式:
   1. 设置环境变量: export DASHSCOPE_API_KEY="sk-xxx"  (Windows: set DASHSCOPE_API_KEY=sk-xxx)
-  2. 运行: python main.py
+  2. 运行: python -m voice2txt.cli
   3. 对着麦克风说话，实时输出识别文字
   4. 按 Ctrl+C 停止
 """
@@ -21,7 +21,7 @@ import argparse
 import dashscope
 from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
 
-from polish import polish_text
+from voice2txt.polish import polish_text
 
 IS_WINDOWS = sys.platform == "win32"
 MIC_RATE = 48000

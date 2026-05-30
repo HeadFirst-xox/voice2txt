@@ -1,4 +1,5 @@
 __pycache__/
+.venv/
 *.pyc
 *.wav
 *.mp3
@@ -7,3 +8,5 @@ __pycache__/
 temp_dir/
 .webui.pid
 webui.log
+.dashscope_api_key
+.claude/

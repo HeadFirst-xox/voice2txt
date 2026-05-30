@@ -5,10 +5,10 @@
 支持：上传音频文件 / 浏览器麦克风录音 / 实时流式识别
 
 运行方式:
-  python webui.py              # 前台运行
-  python webui.py -d           # 后台运行，自动打开浏览器
-  python webui.py --stop       # 停止后台进程
-  python webui.py --status     # 查看运行状态
+  python start.py              # 推荐：跨平台快捷入口（默认 toggle）
+  python -m voice2txt.webui    # 前台运行
+  python -m voice2txt.webui -d # 后台运行，自动打开浏览器
+  python -m voice2txt.webui -t # 开关切换
 """
 
 import os
@@ -30,15 +30,16 @@ import gradio as gr
 from http import HTTPStatus
 from dashscope.audio.asr import Recognition, RecognitionCallback, RecognitionResult
 
-from polish import polish_text
+from voice2txt.polish import polish_text
 
 IS_WINDOWS = sys.platform == "win32"
 TARGET_RATE = 16000
 API_MODEL = "fun-asr-realtime"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PID_FILE = os.path.join(BASE_DIR, ".webui.pid")
-LOG_FILE = os.path.join(BASE_DIR, "webui.log")
-API_KEY_FILE = os.path.join(BASE_DIR, ".dashscope_api_key")
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(_PKG_DIR)
+PID_FILE = os.path.join(ROOT_DIR, ".webui.pid")
+LOG_FILE = os.path.join(ROOT_DIR, "webui.log")
+API_KEY_FILE = os.path.join(ROOT_DIR, ".dashscope_api_key")
 DEFAULT_PORT = 7860
 DEFAULT_IDLE_TIMEOUT = 300
 
@@ -219,8 +220,7 @@ def _pid_matches_webui(pid_info: dict) -> bool:
     commandline = _read_process_commandline(pid).lower()
     if not commandline:
         return False
-    script_name = os.path.basename(__file__).lower()
-    if script_name not in commandline:
+    if "voice2txt.webui" not in commandline and "webui.py" not in commandline:
         return False
     return _port_is_listening(port)
 
@@ -235,19 +235,48 @@ def _read_pid() -> dict | None:
     return pid_info
 
 
-def _cmd_stop():
+def _stop_service() -> bool:
     pid_info = _read_pid()
     if pid_info is None:
-        safe_print("没有找到运行中的 WebUI 进程")
-        sys.exit(1)
+        return False
     pid = pid_info["pid"]
     if IS_WINDOWS:
         os.kill(pid, signal.SIGBREAK)
     else:
         os.kill(pid, signal.SIGTERM)
-    safe_print(f"已停止 WebUI (PID: {pid})")
     _cleanup_pid()
+    return True
+
+
+def _cmd_stop():
+    if not _stop_service():
+        safe_print("没有找到运行中的 WebUI 进程")
+        sys.exit(1)
+    safe_print("已停止 WebUI")
     sys.exit(0)
+
+
+def _cmd_open():
+    pid_info = _read_pid()
+    if pid_info is None:
+        safe_print("WebUI 未运行。启动: python start.py")
+        sys.exit(1)
+    import webbrowser
+    url = f"http://localhost:{pid_info['port']}"
+    webbrowser.open(url)
+    safe_print(f"已打开 {url}")
+    sys.exit(0)
+
+
+def _cmd_toggle(port: int):
+    existing = _read_pid()
+    if existing:
+        if _stop_service():
+            safe_print(f"已关闭 WebUI (原 PID: {existing['pid']})")
+        else:
+            safe_print("关闭 WebUI 失败")
+        sys.exit(0)
+    _daemonize(port)
 
 
 def _cmd_status():
@@ -265,14 +294,14 @@ def _daemonize(port: int):
         import webbrowser
         log = open(LOG_FILE, "a")
         proc = subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__),
-             "--port", str(port)],
+            [sys.executable, "-m", "voice2txt.webui", "--port", str(port)],
             stdout=log, stderr=log,
+            cwd=ROOT_DIR,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         safe_print(f"WebUI 已在后台启动 (PID: {proc.pid})")
         safe_print(f"访问: http://localhost:{port}")
-        safe_print("停止: python webui.py --stop")
+        safe_print("关闭: python start.py")
         time.sleep(2)
         webbrowser.open(f"http://localhost:{port}")
         sys.exit(0)
@@ -281,7 +310,7 @@ def _daemonize(port: int):
         if pid > 0:
             safe_print(f"WebUI 已在后台启动 (PID: {pid})")
             safe_print(f"访问: http://localhost:{port}")
-            safe_print("停止: python webui.py --stop")
+            safe_print("关闭: python start.py")
 
             import webbrowser
             time.sleep(1)
@@ -662,18 +691,97 @@ MODELS = [
 
 LANGUAGES = ["auto", "zh", "en", "ja"]
 
-COPY_JS = "(text) => { navigator.clipboard.writeText(text || ''); }"
+# 复制时去掉统计行、实时预览前缀，并弹出轻提示（便于粘贴到 AI 对话）
+COPY_JS = """
+(text) => {
+  const strip = (s) => {
+    let t = (s || "").trim();
+    const marker = "\\n\\n---\\n⏱️";
+    const i = t.indexOf(marker);
+    if (i >= 0) t = t.slice(0, i).trim();
+    t = t.split("\\n").map((l) => (l.startsWith("🔵 ") ? l.slice(3) : l)).join("\\n");
+    if (t === "（等待语音输入...）") t = "";
+    return t;
+  };
+  const v = strip(text);
+  navigator.clipboard.writeText(v);
+  const el = document.createElement("div");
+  el.textContent = v ? "已复制到剪贴板" : "没有可复制的内容";
+  Object.assign(el.style, {
+    position: "fixed", bottom: "24px", left: "50%", transform: "translateX(-50%)",
+    background: "#1f2937", color: "#fff", padding: "10px 18px", borderRadius: "8px",
+    zIndex: 99999, fontSize: "14px", boxShadow: "0 4px 12px rgba(0,0,0,.25)",
+  });
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 1600);
+}
+"""
+
+COPY_PRIMARY_JS = """
+(polished, raw, auto) => {
+  if (!auto) return;
+  const strip = (s) => {
+    let t = (s || "").trim();
+    const marker = "\\n\\n---\\n⏱️";
+    const i = t.indexOf(marker);
+    if (i >= 0) t = t.slice(0, i).trim();
+    t = t.split("\\n").map((l) => (l.startsWith("🔵 ") ? l.slice(3) : l)).join("\\n");
+    if (t === "（等待语音输入...）") t = "";
+    return t;
+  };
+  const v = strip(polished) || strip(raw);
+  if (!v) return;
+  navigator.clipboard.writeText(v);
+  const el = document.createElement("div");
+  el.textContent = "已复制主结果（润色优先）";
+  Object.assign(el.style, {
+    position: "fixed", bottom: "24px", left: "50%", transform: "translateX(-50%)",
+    background: "#1f2937", color: "#fff", padding: "10px 18px", borderRadius: "8px",
+    zIndex: 99999, fontSize: "14px", boxShadow: "0 4px 12px rgba(0,0,0,.25)",
+  });
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 1600);
+}
+"""
+
+TEXTBOX_KW = {"lines": 10, "elem_classes": ["result-box"]}
 
 CSS = """
-.result-box { min-height: 200px; }
-.copy-btn { min-height: 44px !important; font-size: 16px !important; }
+.result-box { min-height: 220px; font-size: 15px !important; line-height: 1.55 !important; }
+.result-box textarea { font-family: ui-monospace, "Cascadia Code", Consolas, monospace !important; }
+.copy-btn { min-height: 44px !important; font-size: 15px !important; }
+.copy-primary-btn { min-height: 48px !important; font-weight: 600 !important; }
 footer { display: none !important; }
 """
 
 
+def _copy_buttons(raw_output, polished_output):
+    """为每个 Tab 生成复制按钮行（含一键复制主结果）。"""
+    with gr.Row():
+        copy_raw = gr.Button("📋 复制原文", scale=1)
+        copy_pol = gr.Button("📋 复制润色", scale=1)
+        copy_primary = gr.Button(
+            "📋 一键复制主结果",
+            variant="primary",
+            scale=2,
+            elem_classes=["copy-primary-btn"],
+        )
+    copy_raw.click(fn=None, inputs=[raw_output], js=COPY_JS)
+    copy_pol.click(fn=None, inputs=[polished_output], js=COPY_JS)
+    copy_primary.click(
+        fn=None,
+        inputs=[polished_output, raw_output],
+        js="(p, r) => { const strip = (s) => { let t = (s||'').trim(); const m='\\n\\n---\\n⏱️'; const i=t.indexOf(m); if(i>=0)t=t.slice(0,i).trim(); t=t.split('\\n').map(l=>l.startsWith('🔵 ')?l.slice(3):l).join('\\n'); if(t==='（等待语音输入...）')t=''; return t; }; const v=strip(p)||strip(r); if(!v)return; navigator.clipboard.writeText(v); const el=document.createElement('div'); el.textContent='已复制主结果（润色优先）'; Object.assign(el.style,{position:'fixed',bottom:'24px',left:'50%',transform:'translateX(-50%)',background:'#1f2937',color:'#fff',padding:'10px 18px',borderRadius:'8px',zIndex:99999,fontSize:'14px'}); document.body.appendChild(el); setTimeout(()=>el.remove(),1600); }",
+    )
+
+
 def build_ui():
     with gr.Blocks(title="语音转文字") as demo:
-        gr.Markdown("# 🎙️ 语音转文字\n基于阿里云百炼 Fun-ASR API")
+        gr.Markdown(
+            "# 🎙️ 语音转文字\n"
+            "基于阿里云百炼 Fun-ASR · 日常建议用 **实时识别** → 停止后自动复制，粘贴到 AI 对话\n\n"
+            "快捷命令：`python start.py` 开关服务 · `python start.py open` 只打开页面"
+        )
 
         with gr.Row():
             api_key_input = gr.Textbox(
@@ -690,82 +798,35 @@ def build_ui():
                 label="语言", choices=LANGUAGES, value="auto", scale=1,
             )
             polish_toggle = gr.Checkbox(
-                label="✨ 润色", value=True,
-                info="使用 LLM 去除口头禅、润色语序",
+                label="✨ 润色",
+                value=True,
+                info="去口头禅；复制时优先用润色结果",
                 scale=1,
             )
 
         with gr.Tabs():
-            # Tab 1: 上传文件
-            with gr.Tab("📁 上传音频文件"):
-                file_input = gr.Audio(
-                    label="上传音频（支持 wav/mp3/m4a/flac 等）",
-                    type="filepath",
+            # Tab 1（默认）: 实时流式 — 日常口述 / AI 输入主场景
+            with gr.Tab("⚡ 实时识别"):
+                gr.Markdown(
+                    "系统麦克风边说边出字。**停止** 后可自动复制主结果；也可随时点「一键复制」。"
                 )
-                file_btn = gr.Button("开始识别", variant="primary")
                 with gr.Row():
-                    file_raw_output = gr.Textbox(
-                        label="原始识别", lines=10, elem_classes="result-box",
+                    start_btn = gr.Button("🎤 开始", variant="primary", scale=2)
+                    stop_btn = gr.Button("⏹ 停止并复制", interactive=False, scale=2)
+                    refresh_btn = gr.Button("🔄 刷新", scale=1)
+                    auto_copy_toggle = gr.Checkbox(
+                        label="停止后自动复制",
+                        value=True,
+                        scale=2,
                     )
-                    file_polished_output = gr.Textbox(
-                        label="✨ 润色结果", lines=10, elem_classes="result-box",
-                    )
-                with gr.Row():
-                    file_copy_raw = gr.Button("📋 复制原始识别", scale=1)
-                    file_copy_pol = gr.Button("📋 复制润色结果", variant="primary", scale=1, elem_classes="copy-btn")
-                file_copy_raw.click(fn=None, inputs=[file_raw_output], js=COPY_JS)
-                file_copy_pol.click(fn=None, inputs=[file_polished_output], js=COPY_JS)
-                file_btn.click(
-                    transcribe_file,
-                    inputs=[file_input, api_key_input, model_input, lang_input, polish_toggle],
-                    outputs=[file_raw_output, file_polished_output],
-                )
-
-            # Tab 2: 浏览器麦克风
-            with gr.Tab("🎤 浏览器录音"):
-                mic_input = gr.Audio(
-                    label="点击录音按钮开始说话",
-                    sources=["microphone"],
-                    type="numpy",
-                )
-                mic_btn = gr.Button("识别录音", variant="primary")
-                with gr.Row():
-                    mic_raw_output = gr.Textbox(
-                        label="原始识别", lines=10, elem_classes="result-box",
-                    )
-                    mic_polished_output = gr.Textbox(
-                        label="✨ 润色结果", lines=10, elem_classes="result-box",
-                    )
-                with gr.Row():
-                    mic_copy_raw = gr.Button("📋 复制原始识别", scale=1)
-                    mic_copy_pol = gr.Button("📋 复制润色结果", variant="primary", scale=1, elem_classes="copy-btn")
-                mic_copy_raw.click(fn=None, inputs=[mic_raw_output], js=COPY_JS)
-                mic_copy_pol.click(fn=None, inputs=[mic_polished_output], js=COPY_JS)
-                mic_btn.click(
-                    transcribe_mic,
-                    inputs=[mic_input, api_key_input, model_input, lang_input, polish_toggle],
-                    outputs=[mic_raw_output, mic_polished_output],
-                )
-
-            # Tab 3: 实时流式
-            with gr.Tab("⚡ 实时识别（系统麦克风）"):
-                gr.Markdown("使用系统麦克风进行实时流式语音识别，边说边出文字。")
-                with gr.Row():
-                    start_btn = gr.Button("🎤 开始录音", variant="primary")
-                    stop_btn = gr.Button("⏹ 停止", interactive=False)
-                    refresh_btn = gr.Button("🔄 刷新结果")
                 with gr.Row():
                     realtime_raw_output = gr.Textbox(
-                        label="原始识别", lines=12, elem_classes="result-box",
+                        label="原始识别", **{**TEXTBOX_KW, "lines": 14},
                     )
                     realtime_polished_output = gr.Textbox(
-                        label="✨ 润色结果", lines=12, elem_classes="result-box",
+                        label="✨ 润色结果（复制优先）", **{**TEXTBOX_KW, "lines": 14},
                     )
-                with gr.Row():
-                    rt_copy_raw = gr.Button("📋 复制原始识别", scale=1)
-                    rt_copy_pol = gr.Button("📋 复制润色结果", variant="primary", scale=1, elem_classes="copy-btn")
-                rt_copy_raw.click(fn=None, inputs=[realtime_raw_output], js=COPY_JS)
-                rt_copy_pol.click(fn=None, inputs=[realtime_polished_output], js=COPY_JS)
+                _copy_buttons(realtime_raw_output, realtime_polished_output)
 
                 start_btn.click(
                     start_realtime,
@@ -776,10 +837,47 @@ def build_ui():
                     stop_realtime,
                     inputs=[api_key_input, polish_toggle],
                     outputs=[realtime_raw_output, realtime_polished_output, stop_btn, start_btn],
+                ).then(
+                    fn=None,
+                    inputs=[realtime_polished_output, realtime_raw_output, auto_copy_toggle],
+                    js=COPY_PRIMARY_JS,
                 )
                 refresh_btn.click(
                     poll_realtime,
                     outputs=realtime_raw_output,
+                )
+
+            with gr.Tab("🎤 浏览器录音"):
+                mic_input = gr.Audio(
+                    label="点击录音按钮开始说话",
+                    sources=["microphone"],
+                    type="numpy",
+                )
+                mic_btn = gr.Button("识别录音", variant="primary")
+                with gr.Row():
+                    mic_raw_output = gr.Textbox(label="原始识别", **TEXTBOX_KW)
+                    mic_polished_output = gr.Textbox(label="✨ 润色结果", **TEXTBOX_KW)
+                _copy_buttons(mic_raw_output, mic_polished_output)
+                mic_btn.click(
+                    transcribe_mic,
+                    inputs=[mic_input, api_key_input, model_input, lang_input, polish_toggle],
+                    outputs=[mic_raw_output, mic_polished_output],
+                )
+
+            with gr.Tab("📁 上传文件"):
+                file_input = gr.Audio(
+                    label="上传音频（支持 wav/mp3/m4a/flac 等）",
+                    type="filepath",
+                )
+                file_btn = gr.Button("开始识别", variant="primary")
+                with gr.Row():
+                    file_raw_output = gr.Textbox(label="原始识别", **TEXTBOX_KW)
+                    file_polished_output = gr.Textbox(label="✨ 润色结果", **TEXTBOX_KW)
+                _copy_buttons(file_raw_output, file_polished_output)
+                file_btn.click(
+                    transcribe_file,
+                    inputs=[file_input, api_key_input, model_input, lang_input, polish_toggle],
+                    outputs=[file_raw_output, file_polished_output],
                 )
 
     return demo
@@ -790,6 +888,14 @@ def parse_args():
     parser.add_argument(
         "-d", "--daemon", action="store_true",
         help="后台运行，自动打开浏览器",
+    )
+    parser.add_argument(
+        "-t", "--toggle", action="store_true",
+        help="开关切换：已运行则停止，未运行则后台启动",
+    )
+    parser.add_argument(
+        "--open", action="store_true",
+        help="仅打开浏览器（需 WebUI 已在运行）",
     )
     parser.add_argument(
         "--stop", action="store_true",
@@ -817,12 +923,18 @@ if __name__ == "__main__":
         _cmd_stop()
     if args.status:
         _cmd_status()
+    if args.open:
+        _cmd_open()
+    if args.toggle:
+        _cmd_toggle(args.port)
 
     existing = _read_pid()
     if existing:
         safe_print(
-            f"WebUI 已在运行 (PID: {existing['pid']}, 端口: {existing['port']})，先执行 python webui.py --stop"
+            f"WebUI 已在运行 (PID: {existing['pid']}, 端口: {existing['port']})"
         )
+        safe_print("  打开页面: python start.py open")
+        safe_print("  关闭服务: python start.py stop")
         sys.exit(1)
 
     timeout = args.idle_timeout
